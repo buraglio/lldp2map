@@ -1,0 +1,333 @@
+package lldp
+
+import (
+	"fmt"
+	"net"
+	"strings"
+
+	snmpclient "github.com/buraglio/lldp2map/internal/snmp"
+	"github.com/gosnmp/gosnmp"
+)
+
+// LLDP-MIB OIDs (IEEE 802.1AB)
+const (
+	// Local system
+	oidLocSysName  = "1.0.8802.1.1.2.1.3.3.0"
+	oidLocPortDesc = "1.0.8802.1.1.2.1.3.7.1.4"
+
+	// Remote neighbor table (index: timeMark.portNum.remIndex)
+	oidRemPortId   = "1.0.8802.1.1.2.1.4.1.1.7"
+	oidRemPortDesc = "1.0.8802.1.1.2.1.4.1.1.8"
+
+	// IP-MIB (RFC 4293) — modern unified IPv4+IPv6 address table.
+	// Index: InetAddressType.InetAddressLength.InetAddress[bytes]
+	// addrType 1=IPv4 (4 bytes), 2=IPv6 (16 bytes)
+	oidIPAddressIfIndex = "1.3.6.1.2.1.4.34.1.3"
+
+	// IP-MIB (RFC 1213) — legacy IPv4-only address table, fallback.
+	// Index: the IPv4 address itself (4 octets).
+	oidIPAdEntAddr = "1.3.6.1.2.1.4.20.1.1"
+	oidRemSysName  = "1.0.8802.1.1.2.1.4.1.1.9"
+
+	// Remote management address table
+	// Index: timeMark.portNum.remIndex.addrSubtype.addrLen.addr[bytes]
+	oidRemManAddrIfId = "1.0.8802.1.1.2.1.4.2.1.3"
+)
+
+// Neighbor represents a single LLDP-discovered neighbor.
+type Neighbor struct {
+	LocalPort  string
+	RemoteSys  string
+	RemotePort string
+	MgmtAddrs  []net.IP
+}
+
+// LocalInfo holds the local device name and all discovered neighbors.
+type LocalInfo struct {
+	SysName   string
+	Neighbors []Neighbor
+}
+
+// remKey uniquely identifies a remote neighbor entry by local port and remote index.
+type remKey struct{ portNum, remIndex string }
+
+// Walk queries LLDP MIB tables on the device and returns discovered neighbors.
+func Walk(client *snmpclient.Client) (*LocalInfo, error) {
+	info := &LocalInfo{}
+
+	// Local system name
+	if pdu, err := client.Get(oidLocSysName); err == nil {
+		info.SysName = pduToString(pdu)
+	}
+
+	// Local port descriptions: index = portNum
+	localPorts := map[string]string{}
+	if pdus, err := client.Walk(oidLocPortDesc); err == nil {
+		for _, pdu := range pdus {
+			portNum := suffixAfter(pdu.Name, oidLocPortDesc)
+			if portNum != "" {
+				localPorts[portNum] = pduToString(&pdu)
+			}
+		}
+	}
+
+	// Remote sys names: index = timeMark.portNum.remIndex
+	sysNames := map[remKey]string{}
+	pdus, err := client.Walk(oidRemSysName)
+	if err != nil {
+		return nil, fmt.Errorf("walk lldpRemSysName: %w", err)
+	}
+	for _, pdu := range pdus {
+		if k, ok := parseRemKey(pdu.Name, oidRemSysName); ok {
+			sysNames[k] = pduToString(&pdu)
+		}
+	}
+
+	// Remote port descriptions
+	remPortDescs := map[remKey]string{}
+	if pdus, err := client.Walk(oidRemPortDesc); err == nil {
+		for _, pdu := range pdus {
+			if k, ok := parseRemKey(pdu.Name, oidRemPortDesc); ok {
+				remPortDescs[k] = pduToString(&pdu)
+			}
+		}
+	}
+
+	// Remote port IDs (fallback when description is empty)
+	remPortIds := map[remKey]string{}
+	if pdus, err := client.Walk(oidRemPortId); err == nil {
+		for _, pdu := range pdus {
+			if k, ok := parseRemKey(pdu.Name, oidRemPortId); ok {
+				remPortIds[k] = pduToString(&pdu)
+			}
+		}
+	}
+
+	// Remote management addresses
+	mgmtAddrs := map[remKey][]net.IP{}
+	if pdus, err := client.Walk(oidRemManAddrIfId); err == nil {
+		for _, pdu := range pdus {
+			k, ip, ok := parseMgmtAddr(pdu.Name)
+			if ok && ip != nil {
+				mgmtAddrs[k] = append(mgmtAddrs[k], ip)
+			}
+		}
+	}
+
+	// Assemble neighbor list
+	for k, sysName := range sysNames {
+		if sysName == "" {
+			continue
+		}
+
+		localPort := localPorts[k.portNum]
+		if localPort == "" {
+			localPort = "port-" + k.portNum
+		}
+
+		remotePort := remPortDescs[k]
+		if remotePort == "" {
+			remotePort = remPortIds[k]
+		}
+
+		info.Neighbors = append(info.Neighbors, Neighbor{
+			LocalPort:  localPort,
+			RemoteSys:  sysName,
+			RemotePort: remotePort,
+			MgmtAddrs:  mgmtAddrs[k],
+		})
+	}
+
+	return info, nil
+}
+
+// suffixAfter strips the base OID prefix (with leading dot) and returns the suffix.
+// Returns "" if the OID doesn't start with the expected prefix.
+func suffixAfter(oidName, base string) string {
+	prefix := "." + base + "."
+	if !strings.HasPrefix(oidName, prefix) {
+		// Try without leading dot on base
+		prefix = base + "."
+		if !strings.HasPrefix(oidName, prefix) {
+			return ""
+		}
+	}
+	return strings.TrimPrefix(oidName, prefix)
+}
+
+// parseRemKey extracts a remKey from an OID with index timeMark.portNum.remIndex.
+func parseRemKey(oidName, base string) (remKey, bool) {
+	suffix := suffixAfter(oidName, base)
+	if suffix == "" {
+		return remKey{}, false
+	}
+	parts := strings.SplitN(suffix, ".", 3)
+	if len(parts) < 3 {
+		return remKey{}, false
+	}
+	return remKey{portNum: parts[1], remIndex: parts[2]}, true
+}
+
+// parseMgmtAddr parses a management address OID.
+// Index: timeMark.portNum.remIndex.addrSubtype.addrLen.addr[bytes]
+// addrSubtype 1 = IPv4 (4 bytes), 2 = IPv6 (16 bytes)
+func parseMgmtAddr(oidName string) (remKey, net.IP, bool) {
+	suffix := suffixAfter(oidName, oidRemManAddrIfId)
+	if suffix == "" {
+		return remKey{}, nil, false
+	}
+
+	parts := strings.Split(suffix, ".")
+	// Minimum: timeMark(1) portNum(1) remIndex(1) addrSubtype(1) addrLen(1) addr(>=4)
+	if len(parts) < 9 {
+		return remKey{}, nil, false
+	}
+
+	k := remKey{portNum: parts[1], remIndex: parts[2]}
+	addrSubtype := parts[3]
+	// parts[4] = addrLen (we trust the subtype to determine length)
+
+	switch addrSubtype {
+	case "1": // IPv4
+		if len(parts) < 9 {
+			return k, nil, false
+		}
+		ipStr := strings.Join(parts[5:9], ".")
+		ip := net.ParseIP(ipStr)
+		return k, ip, ip != nil
+	case "2": // IPv6
+		if len(parts) < 21 {
+			return k, nil, false
+		}
+		b := make([]byte, 16)
+		for i := 0; i < 16; i++ {
+			var v int
+			fmt.Sscanf(parts[5+i], "%d", &v)
+			b[i] = byte(v)
+		}
+		ip := net.IP(b)
+		return k, ip, true
+	}
+
+	return k, nil, false
+}
+
+// WalkIPAddresses returns all non-loopback, non-link-local unicast interface
+// addresses on the device. It queries the modern ipAddressTable (RFC 4293)
+// which covers both IPv4 and IPv6, falling back to the legacy IPv4-only
+// ipAddrTable (RFC 1213) if the modern table is unavailable or empty.
+func WalkIPAddresses(client *snmpclient.Client) ([]string, error) {
+	addrs, err := walkIPAddressTable(client)
+	if err != nil || len(addrs) == 0 {
+		return walkIPv4AddrTable(client)
+	}
+	return addrs, nil
+}
+
+// walkIPAddressTable parses the RFC 4293 ipAddressTable.
+// OID index format: addrType.addrLen.addr[bytes]
+func walkIPAddressTable(client *snmpclient.Client) ([]string, error) {
+	pdus, err := client.Walk(oidIPAddressIfIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]bool{}
+	var addrs []string
+
+	for _, pdu := range pdus {
+		suffix := suffixAfter(pdu.Name, oidIPAddressIfIndex)
+		if suffix == "" {
+			continue
+		}
+		parts := strings.Split(suffix, ".")
+		if len(parts) < 3 {
+			continue
+		}
+
+		addrType := parts[0] // 1=IPv4, 2=IPv6
+		// parts[1] = addrLen
+
+		var ip net.IP
+		switch addrType {
+		case "1": // IPv4: type(1) len(1) addr(4) = min 6 parts
+			if len(parts) >= 6 {
+				ip = net.ParseIP(strings.Join(parts[2:6], "."))
+			}
+		case "2": // IPv6: type(1) len(1) addr(16) = min 18 parts
+			if len(parts) >= 18 {
+				b := make([]byte, 16)
+				for i := 0; i < 16; i++ {
+					var v int
+					fmt.Sscanf(parts[2+i], "%d", &v)
+					b[i] = byte(v)
+				}
+				ip = net.IP(b)
+			}
+		}
+
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		s := ip.String()
+		if !seen[s] {
+			seen[s] = true
+			addrs = append(addrs, s)
+		}
+	}
+
+	return addrs, nil
+}
+
+// walkIPv4AddrTable parses the legacy RFC 1213 ipAddrTable (IPv4 only).
+// The OID index is the IPv4 address itself (4 octets).
+func walkIPv4AddrTable(client *snmpclient.Client) ([]string, error) {
+	pdus, err := client.Walk(oidIPAdEntAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	var addrs []string
+	for _, pdu := range pdus {
+		suffix := suffixAfter(pdu.Name, oidIPAdEntAddr)
+		if suffix == "" {
+			continue
+		}
+		ip := net.ParseIP(suffix)
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		addrs = append(addrs, ip.String())
+	}
+	return addrs, nil
+}
+
+// pduToString converts a PDU value to a printable string.
+// Control characters (including embedded newlines and NUL bytes) are stripped
+// so they cannot corrupt node labels in the rendered diagram.
+func pduToString(pdu *gosnmp.SnmpPDU) string {
+	switch v := pdu.Value.(type) {
+	case string:
+		return cleanString(v)
+	case []byte:
+		// Strip non-printable bytes; if anything useful remains, return it as text.
+		cleaned := cleanString(string(v))
+		if cleaned != "" {
+			return cleaned
+		}
+		return fmt.Sprintf("%x", v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// cleanString removes control characters and trims surrounding whitespace.
+func cleanString(s string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1 // drop control chars and DEL
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(cleaned)
+}
