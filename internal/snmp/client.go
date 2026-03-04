@@ -2,8 +2,6 @@ package snmp
 
 import (
 	"fmt"
-	"net"
-	"strings"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
@@ -54,14 +52,9 @@ type Client struct {
 
 // New creates and connects a new SNMP client.
 func New(cfg Config) (*Client, error) {
-	// gosnmp dials "%s:%d" so bare IPv6 addresses need bracket notation.
-	target := cfg.Host
-	if ip := net.ParseIP(target); ip != nil && ip.To4() == nil && !strings.HasPrefix(target, "[") {
-		target = "[" + target + "]"
-	}
-
+	// gosnmp v1.37+ uses net.JoinHostPort internally and handles bare IPv6 addresses correctly.
 	g := &gosnmp.GoSNMP{
-		Target:  target,
+		Target:  cfg.Host,
 		Port:    cfg.Port,
 		Timeout: cfg.Timeout,
 		Retries: cfg.Retries,
