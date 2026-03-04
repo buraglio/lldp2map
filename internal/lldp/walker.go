@@ -32,6 +32,12 @@ const (
 	// Remote management address table
 	// Index: timeMark.portNum.remIndex.addrSubtype.addrLen.addr[bytes]
 	oidRemManAddrIfId = "1.0.8802.1.1.2.1.4.2.1.3"
+
+	// Remote chassis ID — used as fallback when no management address is advertised.
+	// Index: timeMark.portNum.remIndex
+	// oidRemChassisIdSubtype value: 5 = networkAddress (IP encoded in chassis ID bytes)
+	oidRemChassisIdSubtype = "1.0.8802.1.1.2.1.4.1.1.4"
+	oidRemChassisId        = "1.0.8802.1.1.2.1.4.1.1.5"
 )
 
 // Neighbor represents a single LLDP-discovered neighbor.
@@ -114,6 +120,37 @@ func Walk(client *snmpclient.Client) (*LocalInfo, error) {
 		}
 	}
 
+	// Chassis ID subtypes — value 5 means networkAddress (IP encoded in chassis ID).
+	chassisSubtypes := map[remKey]int{}
+	if pdus, err := client.Walk(oidRemChassisIdSubtype); err == nil {
+		for _, pdu := range pdus {
+			if k, ok := parseRemKey(pdu.Name, oidRemChassisIdSubtype); ok {
+				switch v := pdu.Value.(type) {
+				case int:
+					chassisSubtypes[k] = v
+				case uint:
+					chassisSubtypes[k] = int(v)
+				}
+			}
+		}
+	}
+
+	// Chassis IDs — decode IP when subtype is networkAddress (5).
+	chassisIPs := map[remKey]net.IP{}
+	if pdus, err := client.Walk(oidRemChassisId); err == nil {
+		for _, pdu := range pdus {
+			if k, ok := parseRemKey(pdu.Name, oidRemChassisId); ok {
+				if chassisSubtypes[k] == 5 {
+					if b, ok := pdu.Value.([]byte); ok {
+						if ip := parseNetworkAddress(b); ip != nil {
+							chassisIPs[k] = ip
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Assemble neighbor list
 	for k, sysName := range sysNames {
 		if sysName == "" {
@@ -130,11 +167,19 @@ func Walk(client *snmpclient.Client) (*LocalInfo, error) {
 			remotePort = remPortIds[k]
 		}
 
+		addrs := mgmtAddrs[k]
+		// Fall back to chassis IP when no explicit management address is advertised.
+		if len(addrs) == 0 {
+			if ip := chassisIPs[k]; ip != nil {
+				addrs = []net.IP{ip}
+			}
+		}
+
 		info.Neighbors = append(info.Neighbors, Neighbor{
 			LocalPort:  localPort,
 			RemoteSys:  sysName,
 			RemotePort: remotePort,
-			MgmtAddrs:  mgmtAddrs[k],
+			MgmtAddrs:  addrs,
 		})
 	}
 
@@ -210,6 +255,19 @@ func parseMgmtAddr(oidName string) (remKey, net.IP, bool) {
 	}
 
 	return k, nil, false
+}
+
+// parseNetworkAddress decodes a networkAddress chassis ID byte slice.
+// Format: [IANA address family (1 byte)] [address bytes]
+// Family 1 = IPv4 (4 bytes), Family 2 = IPv6 (16 bytes).
+func parseNetworkAddress(b []byte) net.IP {
+	if len(b) == 5 && b[0] == 1 {
+		return net.IP(b[1:5]).To4()
+	}
+	if len(b) == 17 && b[0] == 2 {
+		return net.IP(b[1:17])
+	}
+	return nil
 }
 
 // WalkIPAddresses returns all non-loopback, non-link-local unicast interface
