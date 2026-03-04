@@ -35,9 +35,13 @@ const (
 
 	// Remote chassis ID — used as fallback when no management address is advertised.
 	// Index: timeMark.portNum.remIndex
-	// oidRemChassisIdSubtype value: 5 = networkAddress (IP encoded in chassis ID bytes)
+	// oidRemChassisIdSubtype: 4=macAddress, 5=networkAddress
 	oidRemChassisIdSubtype = "1.0.8802.1.1.2.1.4.1.1.4"
 	oidRemChassisId        = "1.0.8802.1.1.2.1.4.1.1.5"
+
+	// ARP table — IPv4 MAC→IP mapping on the queried device.
+	// Index: ifIndex.a.b.c.d  Value: MAC (6 bytes)
+	oidARPPhysAddr = "1.3.6.1.2.1.4.22.1.2"
 )
 
 // Neighbor represents a single LLDP-discovered neighbor.
@@ -120,7 +124,7 @@ func Walk(client *snmpclient.Client) (*LocalInfo, error) {
 		}
 	}
 
-	// Chassis ID subtypes — value 5 means networkAddress (IP encoded in chassis ID).
+	// Chassis ID subtypes: 4=macAddress, 5=networkAddress
 	chassisSubtypes := map[remKey]int{}
 	if pdus, err := client.Walk(oidRemChassisIdSubtype); err == nil {
 		for _, pdu := range pdus {
@@ -135,17 +139,39 @@ func Walk(client *snmpclient.Client) (*LocalInfo, error) {
 		}
 	}
 
-	// Chassis IDs — decode IP when subtype is networkAddress (5).
+	// Chassis IDs: extract IP for subtype 5 (networkAddress) and collect MACs for subtype 4.
 	chassisIPs := map[remKey]net.IP{}
+	chassisMACs := map[remKey][6]byte{}
 	if pdus, err := client.Walk(oidRemChassisId); err == nil {
 		for _, pdu := range pdus {
 			if k, ok := parseRemKey(pdu.Name, oidRemChassisId); ok {
-				if chassisSubtypes[k] == 5 {
-					if b, ok := pdu.Value.([]byte); ok {
-						if ip := parseNetworkAddress(b); ip != nil {
-							chassisIPs[k] = ip
-						}
+				b, isByte := pdu.Value.([]byte)
+				if !isByte {
+					continue
+				}
+				switch chassisSubtypes[k] {
+				case 5: // networkAddress — IP encoded directly
+					if ip := parseNetworkAddress(b); ip != nil {
+						chassisIPs[k] = ip
 					}
+				case 4: // macAddress — resolve via ARP table
+					if len(b) == 6 {
+						var mac [6]byte
+						copy(mac[:], b)
+						chassisMACs[k] = mac
+					}
+				}
+			}
+		}
+	}
+
+	// For MAC-identified chassis IDs, look up the matching IP in the device's ARP table.
+	if len(chassisMACs) > 0 {
+		arpMap := walkARP(client)
+		for k, mac := range chassisMACs {
+			if _, already := chassisIPs[k]; !already {
+				if ip, found := arpMap[mac]; found {
+					chassisIPs[k] = ip
 				}
 			}
 		}
@@ -268,6 +294,45 @@ func parseNetworkAddress(b []byte) net.IP {
 		return net.IP(b[1:17])
 	}
 	return nil
+}
+
+// walkARP walks the IPv4 ARP table (ipNetToMediaPhysAddress) on the device and
+// returns a map from MAC address to IPv4 address.
+// OID index: ifIndex.a.b.c.d  Value: 6-byte MAC
+func walkARP(client *snmpclient.Client) map[[6]byte]net.IP {
+	result := map[[6]byte]net.IP{}
+	pdus, err := client.Walk(oidARPPhysAddr)
+	if err != nil {
+		return result
+	}
+	for _, pdu := range pdus {
+		suffix := suffixAfter(pdu.Name, oidARPPhysAddr)
+		if suffix == "" {
+			continue
+		}
+		parts := strings.Split(suffix, ".")
+		// Index is ifIndex + 4 IP octets — need at least 5 parts.
+		if len(parts) < 5 {
+			continue
+		}
+		ipStr := strings.Join(parts[len(parts)-4:], ".")
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			continue
+		}
+		ip = ip.To4()
+		if ip == nil {
+			continue
+		}
+		b, ok := pdu.Value.([]byte)
+		if !ok || len(b) != 6 {
+			continue
+		}
+		var mac [6]byte
+		copy(mac[:], b)
+		result[mac] = ip
+	}
+	return result
 }
 
 // WalkIPAddresses returns all non-loopback, non-link-local unicast interface
