@@ -114,6 +114,12 @@ lldp2map -c public -f drawio 3fff::1
 lldp2map -c public -f excalidraw 3fff::1
 ```
 
+## Example Output
+
+![Example topology diagram](docs/example.png)
+
+The diagram above was generated from a synthetic topology using `lldp2map --show-addrs`. Each node shows the device name and, when `--show-addrs` is set, its interface addresses. Port labels appear near the originating device on each link.
+
 ## How It Works
 
 1. Connects to the seed device via SNMP and walks the LLDP-MIB remote neighbor table
