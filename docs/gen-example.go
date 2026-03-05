@@ -28,7 +28,7 @@ func main() {
 	// Interface addresses to show how the --show-addrs behaviour works
 	topo.SetAddrs("core-router", []string{"3fff:ffff::1", "3fff:ffff::2"})
 
-	// Edges with port labels
+	// Show edge devs with port labels
 	topo.AddEdge("core-router", "edge-router-1", "eth0", "Gi0/0")
 	topo.AddEdge("core-router", "edge-router-2", "eth1", "Gi0/0")
 	topo.AddEdge("edge-router-1", "dist-sw", "Gi0/1", "Te1/1")
