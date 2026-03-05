@@ -3,6 +3,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"net/url"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,19 @@ import (
 
 	"github.com/buraglio/lldp2map/internal/discover"
 )
+
+// terminalTheme overrides colours for the log pane: green text on near-black.
+type terminalTheme struct{ fyne.Theme }
+
+func (t terminalTheme) Color(n fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
+	switch n {
+	case theme.ColorNameForeground, theme.ColorNameDisabled:
+		return color.RGBA{R: 57, G: 255, B: 20, A: 255} // #39FF14 bright terminal green
+	case theme.ColorNameBackground, theme.ColorNameInputBackground:
+		return color.RGBA{R: 13, G: 17, B: 23, A: 255} // #0D1117 near-black
+	}
+	return t.Theme.Color(n, v)
+}
 
 // Run launches the Fyne GUI. Must be called from the main goroutine.
 func Run() {
@@ -302,11 +316,12 @@ func Run() {
 	leftScroll.SetMinSize(fyne.NewSize(340, 0))
 
 	// ── Right panel: log ──────────────────────────────────────────────────────
+	logTerminal := container.NewThemeOverride(logScroll, terminalTheme{theme.Current()})
 	rightPanel := container.NewBorder(
 		widget.NewLabel("Discovery Log"),
 		progressBar,
 		nil, nil,
-		logScroll,
+		logTerminal,
 	)
 
 	// ── Root layout ───────────────────────────────────────────────────────────
