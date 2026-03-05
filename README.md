@@ -1,13 +1,15 @@
 # lldp2map
 
-A Go CLI tool that recursively walks SNMP LLDP neighbor tables across network devices and generates a topology diagram as PNG, PDF, Draw.io, or Excalidraw.
+A Go tool that recursively walks SNMP LLDP neighbor tables across network devices and generates a topology diagram as PNG, PDF, Draw.io, or Excalidraw. Available as both a CLI and a cross-platform GUI.
 
 ## Features
 
 - **SNMPv2c and SNMPv3** support (MD5/SHA/SHA256/SHA512 auth; DES/AES/AES192/AES256 priv)
-- **Recursive BFS discovery** — follows management addresses from each LLDP neighbor
+- **Recursive BFS discovery** — follows management addresses from each LLDP neighbor, with chassis ID and ARP-table fallback for devices that do not advertise explicit management addresses
+- **Verbose discovery log** — each BFS step explains why a device is queued, skipped, or cannot be recursed into
 - **Interface address labels** — optionally annotate each node with its IPv4/IPv6 addresses via `--show-addrs`
 - **Four output formats** — PNG and PDF (via Graphviz), Draw.io XML, Excalidraw JSON
+- **Cross-platform GUI** — launch with `--gui` for a point-and-click interface with live log output and a Cancel button
 - Configurable hop depth, timeout, retries, and port
 - Port labels on edges (local port → remote port)
 - Full IPv6 support for both SNMP transport and LLDP management address discovery
@@ -44,9 +46,19 @@ go install github.com/buraglio/lldp2map@latest
 
 ## Usage
 
+### CLI
+
 ```
 lldp2map <host> [flags]
 ```
+
+### GUI
+
+```bash
+lldp2map --gui
+```
+
+Launches a Fyne-based desktop window with all flags exposed as form fields, a live scrolling discovery log, an infinite progress bar, and Cancel / Open Result buttons.
 
 ### Flags
 
@@ -67,6 +79,7 @@ lldp2map <host> [flags]
 | `--show-addrs` | `false` | Annotate nodes with interface IPv4/IPv6 addresses (walks IP-MIB on each device) |
 | `-o, --output` | `network-map.png` | Output file path |
 | `-f, --format` | `png` | Output format: `png`, `pdf`, `drawio`, `excalidraw` |
+| `--gui` | | Launch the graphical interface (must be the first and only argument) |
 
 ### Examples
 
@@ -114,6 +127,11 @@ lldp2map -c public -f drawio 3fff::1
 lldp2map -c public -f excalidraw 3fff::1
 ```
 
+**Launch GUI:**
+```bash
+lldp2map --gui
+```
+
 ## Example Output
 
 ![Example topology diagram](docs/example.png)
@@ -128,6 +146,16 @@ The diagram above was generated from a synthetic topology using `lldp2map --show
 4. Optionally walks the IP-MIB address table (`--show-addrs`) to collect all interface addresses per device
 5. Repeats until the queue is empty or `--max-hops` depth is reached
 6. Renders the completed graph to the requested output format
+
+### Management Address Resolution
+
+For recursive discovery, lldp2map uses a three-tier fallback to locate a reachable IP for each neighbor:
+
+1. **LLDP management address** (`lldpRemManAddrIfId`) — explicit management IP advertised by the remote device
+2. **Chassis networkAddress** (subtype 5) — IP encoded directly in the LLDP chassis ID field
+3. **Chassis MAC → ARP lookup** (subtype 4) — resolves a MAC-addressed chassis ID to an IP via the queried device's ARP table (`ipNetToMediaPhysAddress`)
+
+Neighbors for which no IP can be resolved are still added to the topology map but are logged as non-recursable. This covers devices such as MikroTik routers that advertise a MAC chassis ID without an explicit management address.
 
 ### Interface Address Discovery (`--show-addrs`)
 
@@ -155,10 +183,13 @@ Draw.io and Excalidraw exports use a circular layout computed by lldp2map. Nodes
 | --- | --- | --- |
 | `1.0.8802.1.1.2.1.3.3.0` | lldpLocSysName | Local device hostname |
 | `1.0.8802.1.1.2.1.3.7.1.4` | lldpLocPortDesc | Local port descriptions |
+| `1.0.8802.1.1.2.1.4.1.1.4` | lldpRemChassisIdSubtype | Remote chassis ID subtype (4=MAC, 5=networkAddress) |
+| `1.0.8802.1.1.2.1.4.1.1.5` | lldpRemChassisId | Remote chassis ID (used for management address fallback) |
 | `1.0.8802.1.1.2.1.4.1.1.7` | lldpRemPortId | Remote port identifier |
 | `1.0.8802.1.1.2.1.4.1.1.8` | lldpRemPortDesc | Remote port description |
 | `1.0.8802.1.1.2.1.4.1.1.9` | lldpRemSysName | Remote system name |
 | `1.0.8802.1.1.2.1.4.2.1.3` | lldpRemManAddrIfId | Remote management addresses |
+| `1.3.6.1.2.1.4.22.1.2` | ipNetToMediaPhysAddress | ARP table (MAC→IP, used for chassis ID fallback) |
 | `1.3.6.1.2.1.4.34.1.3` | ipAddressIfIndex | Interface addresses, IPv4+IPv6 (RFC 4293) |
 | `1.3.6.1.2.1.4.20.1.1` | ipAdEntAddr | Interface addresses, IPv4 only (RFC 1213, fallback) |
 
@@ -166,9 +197,11 @@ Draw.io and Excalidraw exports use a circular layout computed by lldp2map. Nodes
 
 ```
 lldp2map/
-├── main.go                       # Entry point
-├── cmd/root.go                   # CLI flags and discovery loop
+├── main.go                       # Entry point; routes --gui to gui.Run()
+├── cmd/root.go                   # CLI flags (Cobra)
+├── gui/app.go                    # Fyne GUI (--gui flag)
 ├── internal/
+│   ├── discover/discover.go      # BFS discovery engine (shared by CLI and GUI)
 │   ├── snmp/client.go            # SNMP v2c/v3 client (gosnmp)
 │   ├── lldp/walker.go            # LLDP MIB walker, OID parser, IP address walker
 │   ├── graph/topology.go         # In-memory topology graph
@@ -177,20 +210,25 @@ lldp2map/
 │       ├── graphviz.go           # PNG/PDF via Graphviz dot
 │       ├── drawio.go             # Draw.io XML export
 │       └── excalidraw.go         # Excalidraw JSON export
+├── docs/
+│   ├── gen-example.go            # Synthetic example diagram generator (go:build ignore)
+│   └── example.png               # Example diagram embedded in this README
 ├── go.mod
 └── go.sum
 ```
 
 ## Dependencies
 
+- [fyne.io/fyne/v2](https://fyne.io) — cross-platform GUI framework
 - [github.com/gosnmp/gosnmp](https://github.com/gosnmp/gosnmp) — SNMP v2c/v3
 - [github.com/spf13/cobra](https://github.com/spf13/cobra) — CLI framework
 
 ## Caveats
 
-- Recursive discovery requires that LLDP management addresses are populated on the device. Neighbors without management addresses are included in the map but not recursed into.
+- Neighbors with no resolvable IP (no management address, no chassis networkAddress, and no ARP entry for their MAC) are added to the map but not recursed into. The discovery log explicitly reports this for each such neighbor.
 - Duplicate edges (A→B and B→A) are automatically deduplicated.
 - If `lldpLocSysName` is not available, the device IP is used as the node label.
 - `--show-addrs` adds one extra SNMP walk per visited device. On large networks this increases discovery time.
 - Devices with SNMP ACLs must permit access from the host running lldp2map (you do have SNMP ACLs, right?).
+- The GUI requires a display. On headless servers use the CLI.
 - Example addresses in this README use the `3fff::/20` documentation prefix defined in RFC 9637.
