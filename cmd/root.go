@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"time"
 
+	"github.com/buraglio/lldp2map/internal/filter"
 	"github.com/buraglio/lldp2map/internal/graph"
 	"github.com/buraglio/lldp2map/internal/lldp"
 	"github.com/buraglio/lldp2map/internal/render"
@@ -29,10 +31,12 @@ var (
 	snmpPort     uint16
 	snmpTimeout  int
 	snmpRetries  int
-	maxHops      int
-	showAddrs    bool
-	outputFile   string
-	outputFormat string
+	maxHops          int
+	showAddrs        bool
+	addrFamily       string
+	ignorePrefixStrs []string
+	outputFile       string
+	outputFormat     string
 )
 
 var rootCmd = &cobra.Command{
@@ -95,6 +99,8 @@ func init() {
 	// Discovery
 	f.IntVar(&maxHops, "max-hops", 10, "Maximum BFS depth for recursive discovery")
 	f.BoolVar(&showAddrs, "show-addrs", false, "Include interface IPv4/IPv6 addresses in node labels (walks IP-MIB on each device)")
+	f.StringVar(&addrFamily, "addr-family", "both", "Address family to display with --show-addrs: ipv4, ipv6, or both")
+	f.StringArrayVar(&ignorePrefixStrs, "ignore-prefix", nil, "CIDR prefix to exclude from labels and discovery (repeatable: --ignore-prefix 127.0.0.0/8 --ignore-prefix fd68:1::/48)")
 
 	// Output
 	f.StringVarP(&outputFile, "output", "o", "network-map.png", "Output file path")
@@ -103,6 +109,23 @@ func init() {
 
 func run(_ *cobra.Command, args []string) error {
 	seedHost := args[0]
+
+	// Validate --addr-family
+	switch addrFamily {
+	case "ipv4", "ipv6", "both":
+	default:
+		return fmt.Errorf("invalid --addr-family %q: must be ipv4, ipv6, or both", addrFamily)
+	}
+
+	// Parse --ignore-prefix values once so we can reuse them throughout the run.
+	var ignorePrefixes []*net.IPNet
+	if len(ignorePrefixStrs) > 0 {
+		var err error
+		ignorePrefixes, err = filter.ParseIgnorePrefixes(ignorePrefixStrs)
+		if err != nil {
+			return err
+		}
+	}
 
 	validFormats := map[string]string{
 		"png":        ".png",
@@ -164,7 +187,8 @@ func run(_ *cobra.Command, args []string) error {
 		info, err := lldp.Walk(client)
 		var ifAddrs []string
 		if err == nil && showAddrs {
-			ifAddrs, _ = lldp.WalkIPAddresses(client)
+			raw, _ := lldp.WalkIPAddresses(client)
+			ifAddrs = filter.Addrs(raw, addrFamily, ignorePrefixes)
 		}
 		client.Close()
 		if err != nil {
@@ -204,7 +228,7 @@ func run(_ *cobra.Command, args []string) error {
 				continue
 			}
 
-			for _, ip := range neighbor.MgmtAddrs {
+			for _, ip := range filter.IPs(neighbor.MgmtAddrs, addrFamily, ignorePrefixes) {
 				ipStr := ip.String()
 				if !visited[ipStr] && !inQueue(queue, ipStr) {
 					queue = append(queue, queueItem{host: ipStr, depth: item.depth + 1})
