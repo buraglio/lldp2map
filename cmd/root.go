@@ -21,10 +21,12 @@ var (
 	snmpPort     uint16
 	snmpTimeout  int
 	snmpRetries  int
-	maxHops      int
-	showAddrs    bool
-	outputFile   string
-	outputFormat string
+	maxHops          int
+	showAddrs        bool
+	addrFamily       string
+	ignorePrefixStrs []string
+	outputFile       string
+	outputFormat     string
 )
 
 var rootCmd = &cobra.Command{
@@ -87,6 +89,8 @@ func init() {
 	// Discovery
 	f.IntVar(&maxHops, "max-hops", 10, "Maximum BFS depth for recursive discovery")
 	f.BoolVar(&showAddrs, "show-addrs", false, "Include interface IPv4/IPv6 addresses in node labels (walks IP-MIB on each device)")
+	f.StringVar(&addrFamily, "addr-family", "both", "Address family to display/follow when --show-addrs is set: ipv4, ipv6, or both")
+	f.StringArrayVar(&ignorePrefixStrs, "ignore-prefix", nil, "CIDR prefix to exclude from labels and next-hop discovery (repeatable)")
 
 	// Output
 	f.StringVarP(&outputFile, "output", "o", "network-map.png", "Output file path")
@@ -112,22 +116,24 @@ func run(_ *cobra.Command, args []string) error {
 	}
 
 	cfg := discover.Config{
-		SeedHost:     seedHost,
-		Community:    community,
-		Version:      snmpVersion,
-		Username:     username,
-		AuthProto:    authProto,
-		AuthPass:     authPass,
-		PrivProto:    privProto,
-		PrivPass:     privPass,
-		SecLevel:     secLevel,
-		Port:         snmpPort,
-		Timeout:      snmpTimeout,
-		Retries:      snmpRetries,
-		MaxHops:      maxHops,
-		ShowAddrs:    showAddrs,
-		OutputFile:   outputFile,
-		OutputFormat: outputFormat,
+		SeedHost:         seedHost,
+		Community:        community,
+		Version:          snmpVersion,
+		Username:         username,
+		AuthProto:        authProto,
+		AuthPass:         authPass,
+		PrivProto:        privProto,
+		PrivPass:         privPass,
+		SecLevel:         secLevel,
+		Port:             snmpPort,
+		Timeout:          snmpTimeout,
+		Retries:          snmpRetries,
+		MaxHops:          maxHops,
+		ShowAddrs:        showAddrs,
+		AddrFamily:       addrFamily,
+		IgnorePrefixStrs: ignorePrefixStrs,
+		OutputFile:       outputFile,
+		OutputFormat:     outputFormat,
 	}
 
 	_, err := discover.Run(context.Background(), cfg, func(msg string) {

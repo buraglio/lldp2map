@@ -98,6 +98,13 @@ func Run() {
 
 	showAddrsCheck := widget.NewCheck("Show interface addresses (--show-addrs)", nil)
 
+	addrFamilySelect := widget.NewSelect([]string{"both", "ipv4", "ipv6"}, nil)
+	addrFamilySelect.SetSelected("both")
+
+	ignorePrefixEntry := widget.NewMultiLineEntry()
+	ignorePrefixEntry.SetPlaceHolder("One CIDR per line, e.g.\n127.0.0.0/8\nfd68:1::/48")
+	ignorePrefixEntry.SetMinRowsVisible(3)
+
 	// ── Output fields ─────────────────────────────────────────────────────────
 	formatSelect := widget.NewSelect([]string{"png", "pdf", "drawio", "excalidraw"}, nil)
 	formatSelect.SetSelected("png")
@@ -222,23 +229,33 @@ func Run() {
 			outputEntry.SetText(outFile)
 		}
 
+		// Parse the ignore-prefix box: split on newlines, drop blank lines.
+		var ignorePrefixStrs []string
+		for _, line := range strings.Split(ignorePrefixEntry.Text, "\n") {
+			if s := strings.TrimSpace(line); s != "" {
+				ignorePrefixStrs = append(ignorePrefixStrs, s)
+			}
+		}
+
 		cfg := discover.Config{
-			SeedHost:     host,
-			Community:    communityEntry.Text,
-			Version:      versionSelect.Selected,
-			Username:     usernameEntry.Text,
-			AuthProto:    authProtoSelect.Selected,
-			AuthPass:     authPassEntry.Text,
-			PrivProto:    privProtoSelect.Selected,
-			PrivPass:     privPassEntry.Text,
-			SecLevel:     secLevelSelect.Selected,
-			Port:         uint16(port),
-			Timeout:      timeout,
-			Retries:      retries,
-			MaxHops:      maxHops,
-			ShowAddrs:    showAddrsCheck.Checked,
-			OutputFile:   outFile,
-			OutputFormat: formatSelect.Selected,
+			SeedHost:         host,
+			Community:        communityEntry.Text,
+			Version:          versionSelect.Selected,
+			Username:         usernameEntry.Text,
+			AuthProto:        authProtoSelect.Selected,
+			AuthPass:         authPassEntry.Text,
+			PrivProto:        privProtoSelect.Selected,
+			PrivPass:         privPassEntry.Text,
+			SecLevel:         secLevelSelect.Selected,
+			Port:             uint16(port),
+			Timeout:          timeout,
+			Retries:          retries,
+			MaxHops:          maxHops,
+			ShowAddrs:        showAddrsCheck.Checked,
+			AddrFamily:       addrFamilySelect.Selected,
+			IgnorePrefixStrs: ignorePrefixStrs,
+			OutputFile:       outFile,
+			OutputFormat:     formatSelect.Selected,
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -291,6 +308,8 @@ func Run() {
 		widget.NewFormItem("Max Hops", maxHopsEntry),
 		widget.NewFormItem("Timeout (s)", timeoutEntry),
 		widget.NewFormItem("Retries", retriesEntry),
+		widget.NewFormItem("Addr Family", addrFamilySelect),
+		widget.NewFormItem("Ignore Prefixes", ignorePrefixEntry),
 	)
 
 	outputForm := widget.NewForm(

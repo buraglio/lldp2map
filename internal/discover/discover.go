@@ -3,8 +3,10 @@ package discover
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
+	"github.com/buraglio/lldp2map/internal/filter"
 	"github.com/buraglio/lldp2map/internal/graph"
 	"github.com/buraglio/lldp2map/internal/lldp"
 	"github.com/buraglio/lldp2map/internal/render"
@@ -13,22 +15,24 @@ import (
 
 // Config holds all parameters for a single discovery run.
 type Config struct {
-	SeedHost     string
-	Community    string
-	Version      string // "2c" or "3"
-	Username     string
-	AuthProto    string
-	AuthPass     string
-	PrivProto    string
-	PrivPass     string
-	SecLevel     string
-	Port         uint16
-	Timeout      int // seconds
-	Retries      int
-	MaxHops      int
-	ShowAddrs    bool
-	OutputFile   string
-	OutputFormat string
+	SeedHost         string
+	Community        string
+	Version          string // "2c" or "3"
+	Username         string
+	AuthProto        string
+	AuthPass         string
+	PrivProto        string
+	PrivPass         string
+	SecLevel         string
+	Port             uint16
+	Timeout          int // seconds
+	Retries          int
+	MaxHops          int
+	ShowAddrs        bool
+	AddrFamily       string   // "ipv4", "ipv6", or "both" / ""
+	IgnorePrefixStrs []string // CIDR strings excluded from labels and next-hop discovery
+	OutputFile       string
+	OutputFormat     string
 }
 
 type queueItem struct {
@@ -40,6 +44,16 @@ type queueItem struct {
 // The log function receives human-readable status lines as discovery progresses.
 // Cancel ctx to abort an in-progress scan.
 func Run(ctx context.Context, cfg Config, log func(string)) (*graph.Topology, error) {
+	// Parse ignore prefixes once; an empty list is valid (no filtering).
+	var ignorePrefixes []*net.IPNet
+	if len(cfg.IgnorePrefixStrs) > 0 {
+		var err error
+		ignorePrefixes, err = filter.ParseIgnorePrefixes(cfg.IgnorePrefixStrs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	baseCfg := snmpclient.Config{
 		Port:      cfg.Port,
 		Version:   cfg.Version,
@@ -95,7 +109,8 @@ func Run(ctx context.Context, cfg Config, log func(string)) (*graph.Topology, er
 		info, err := lldp.Walk(client)
 		var ifAddrs []string
 		if err == nil && cfg.ShowAddrs {
-			ifAddrs, _ = lldp.WalkIPAddresses(client)
+			raw, _ := lldp.WalkIPAddresses(client)
+			ifAddrs = filter.Addrs(raw, cfg.AddrFamily, ignorePrefixes)
 		}
 		client.Close()
 
@@ -143,7 +158,7 @@ func Run(ctx context.Context, cfg Config, log func(string)) (*graph.Topology, er
 			}
 
 			queued := 0
-			for _, ip := range neighbor.MgmtAddrs {
+			for _, ip := range filter.IPs(neighbor.MgmtAddrs, cfg.AddrFamily, ignorePrefixes) {
 				ipStr := ip.String()
 				if !visited[ipStr] && !inQueue(queue, ipStr) {
 					queue = append(queue, queueItem{host: ipStr, depth: item.depth + 1})
