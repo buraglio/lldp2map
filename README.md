@@ -5,11 +5,14 @@ A Go tool that recursively walks SNMP LLDP neighbor tables across network device
 ## Features
 
 - **SNMPv2c and SNMPv3** support (MD5/SHA/SHA256/SHA512 auth; DES/AES/AES192/AES256 priv)
-- **Recursive BFS discovery** — follows management addresses from each LLDP neighbor, with chassis ID and ARP-table fallback for devices that do not advertise explicit management addresses
-- **Verbose discovery log** — each BFS step explains why a device is queued, skipped, or cannot be recursed into
+- **Recursive BFS discovery** — follows management addresses from each LLDP neighbor, with chassis ID and ARP/NDP-table fallback for devices that do not advertise explicit management addresses
+- **IPv6 NDP neighbor cache** — resolves MAC-based chassis IDs to IPv6 addresses via the RFC 4293 unified neighbor table, falling back to the legacy IPv4-only ARP table
+- **Address family filtering** — `--addr-family ipv4|ipv6|both` limits both displayed labels and next-hop discovery to one address family
+- **Prefix exclusion** — `--ignore-prefix` accepts CIDR ranges to exclude from node labels and BFS discovery (repeatable)
+- **Verbose discovery log** — each BFS step explains why a device is queued, skipped, filtered, or cannot be recursed into
 - **Interface address labels** — optionally annotate each node with its IPv4/IPv6 addresses via `--show-addrs`
 - **Four output formats** — PNG and PDF (via Graphviz), Draw.io XML, Excalidraw JSON
-- **Cross-platform GUI** — launch with `--gui` for a point-and-click interface with live log output and a Cancel button
+- **Cross-platform GUI** — launch with `--gui` or build the dedicated `lldp2map-gui` binary for a point-and-click interface with live log output and a Cancel button
 - Configurable hop depth, timeout, retries, and port
 - Port labels on edges (local port → remote port)
 - Full IPv6 support for both SNMP transport and LLDP management address discovery
@@ -30,7 +33,19 @@ sudo apt install graphviz
 sudo dnf install graphviz
 ```
 
+The GUI depends on OpenGL and (on Linux) X11. These are only needed when building with GUI support (the default).
+
+```bash
+# Debian / Ubuntu
+sudo apt install libgl1-mesa-dev xorg-dev
+
+# RHEL / Fedora
+sudo dnf install mesa-libGL-devel libX11-devel
+```
+
 ## Build
+
+### CLI + GUI (single binary, default)
 
 ```bash
 git clone https://github.com/buraglio/lldp2map.git
@@ -38,7 +53,29 @@ cd lldp2map
 go build -o lldp2map .
 ```
 
-Or install directly to `$GOPATH/bin`:
+### CLI only — no GUI, no C dependencies
+
+Use the `nogui` build tag to produce a pure-Go CLI binary with no OpenGL or X11
+requirements. This is the right choice for headless servers and CI environments.
+
+```bash
+go build -tags nogui -o lldp2map .
+```
+
+### Standalone GUI binary
+
+```bash
+go build -o lldp2map-gui ./cmd/lldp2map-gui
+```
+
+### macOS app bundle (requires the Fyne CLI)
+
+```bash
+go install fyne.io/fyne/v2/cmd/fyne@latest
+fyne package -os darwin -appID io.github.buraglio.lldp2map -name lldp2map
+```
+
+### Install to `$GOPATH/bin`
 
 ```bash
 go install github.com/buraglio/lldp2map@latest
@@ -48,17 +85,23 @@ go install github.com/buraglio/lldp2map@latest
 
 ### CLI
 
-```
+```text
 lldp2map <host> [flags]
 ```
 
 ### GUI
 
 ```bash
+# Via the combined binary
 lldp2map --gui
+
+# Via the dedicated GUI binary
+lldp2map-gui
 ```
 
 Launches a Fyne-based desktop window with all flags exposed as form fields, a live scrolling discovery log, an infinite progress bar, and Cancel / Open Result buttons.
+
+![GUI screenshot](docs/gui.png)
 
 ### Flags
 
@@ -77,6 +120,8 @@ Launches a Fyne-based desktop window with all flags exposed as form fields, a li
 | `--retries` | `2` | SNMP retries per request |
 | `--max-hops` | `10` | Maximum BFS depth for recursive discovery |
 | `--show-addrs` | `false` | Annotate nodes with interface IPv4/IPv6 addresses (walks IP-MIB on each device) |
+| `--addr-family` | `both` | Address family for `--show-addrs` labels and next-hop discovery: `ipv4`, `ipv6`, or `both` |
+| `--ignore-prefix` | | CIDR prefix to exclude from labels and discovery (repeatable) |
 | `-o, --output` | `network-map.png` | Output file path |
 | `-f, --format` | `png` | Output format: `png`, `pdf`, `drawio`, `excalidraw` |
 | `--gui` | | Launch the graphical interface (must be the first and only argument) |
@@ -84,16 +129,19 @@ Launches a Fyne-based desktop window with all flags exposed as form fields, a li
 ### Examples
 
 **SNMPv2c, default community:**
+
 ```bash
 lldp2map -c public 3fff::1
 ```
 
 **SNMPv2c, PDF output, limit to 3 hops:**
+
 ```bash
 lldp2map -c public -f pdf -o topology.pdf --max-hops 3 3fff::1
 ```
 
 **SNMPv3 with auth and privacy (recommended):**
+
 ```bash
 lldp2map -v 3 \
   --username netops \
@@ -107,6 +155,7 @@ lldp2map -v 3 \
 ```
 
 **SNMPv3 auth-only, show interface addresses:**
+
 ```bash
 lldp2map -v 3 \
   --username monitor \
@@ -117,19 +166,46 @@ lldp2map -v 3 \
   3fff:1::1
 ```
 
+**Show only IPv6 addresses, ignore documentation and loopback prefixes:**
+
+```bash
+lldp2map -c public \
+  --show-addrs \
+  --addr-family ipv6 \
+  --ignore-prefix 3fff::/20 \
+  --ignore-prefix ::1/128 \
+  3fff::1
+```
+
+**Exclude RFC1918 and loopback from discovery and labels:**
+
+```bash
+lldp2map -c public \
+  --ignore-prefix 10.0.0.0/8 \
+  --ignore-prefix 172.16.0.0/12 \
+  --ignore-prefix 192.168.0.0/16 \
+  --ignore-prefix 127.0.0.0/8 \
+  10.0.0.1
+```
+
 **Export to Draw.io:**
+
 ```bash
 lldp2map -c public -f drawio 3fff::1
 ```
 
 **Export to Excalidraw:**
+
 ```bash
 lldp2map -c public -f excalidraw 3fff::1
 ```
 
 **Launch GUI:**
+
 ```bash
 lldp2map --gui
+# or
+lldp2map-gui
 ```
 
 ## Example Output
@@ -149,13 +225,23 @@ The diagram above was generated from a synthetic topology using `lldp2map --show
 
 ### Management Address Resolution
 
-For recursive discovery, lldp2map uses a three-tier fallback to locate a reachable IP for each neighbor:
+For recursive discovery, lldp2map uses a four-tier fallback to locate a reachable IP for each neighbor:
 
 1. **LLDP management address** (`lldpRemManAddrIfId`) — explicit management IP advertised by the remote device
 2. **Chassis networkAddress** (subtype 5) — IP encoded directly in the LLDP chassis ID field
-3. **Chassis MAC → ARP lookup** (subtype 4) — resolves a MAC-addressed chassis ID to an IP via the queried device's ARP table (`ipNetToMediaPhysAddress`)
+3. **Chassis MAC → RFC 4293 NDP/ARP lookup** (subtype 4) — resolves a MAC-addressed chassis ID to an IP via the queried device's unified IPv4+IPv6 neighbor table (`ipNetToPhysicalPhysAddress`); prefers global-unicast IPv6 over IPv4 when both exist for the same MAC
+4. **Chassis MAC → legacy ARP fallback** — if the RFC 4293 table is unavailable, falls back to the IPv4-only ARP table (`ipNetToMediaPhysAddress`)
 
-Neighbors for which no IP can be resolved are still added to the topology map but are logged as non-recursable. This covers devices such as MikroTik routers that advertise a MAC chassis ID without an explicit management address.
+Neighbors for which no IP can be resolved are still added to the topology map but are logged as non-recursable. Devices that are only IPv6-reachable (common in dual-stack and IPv6-only networks) are handled by tier 3. This covers devices such as MikroTik routers that advertise a MAC chassis ID without an explicit management address.
+
+If LLDP walk fails partway (e.g., the device responds to SNMP but does not implement the LLDP MIB), the device is still added to the topology using its IP and whatever system name was retrievable.
+
+### Address Filtering
+
+`--addr-family` and `--ignore-prefix` are applied consistently in two places:
+
+- **Node labels** — addresses collected by `--show-addrs` are filtered before being written to the diagram
+- **BFS discovery** — management addresses are filtered before being enqueued as next-hop targets; if all management addresses for a neighbor are excluded, the neighbor is logged as filtered and not recursed into
 
 ### Interface Address Discovery (`--show-addrs`)
 
@@ -164,7 +250,7 @@ When `--show-addrs` is set, each device is additionally queried for its full int
 - **Primary**: `ipAddressTable` (RFC 4293, `1.3.6.1.2.1.4.34`) — covers both IPv4 and IPv6
 - **Fallback**: `ipAddrTable` (RFC 1213, `1.3.6.1.2.1.4.20`) — IPv4 only, used if the modern table is unavailable
 
-Loopback (`127.0.0.0/8`, `::1`) and link-local (`fe80::/10`) addresses are excluded. All other unicast addresses are shown in the node label.
+Loopback (`127.0.0.0/8`, `::1`) and link-local (`fe80::/10`) addresses are excluded. All other unicast addresses are shown in the node label, subject to `--addr-family` and `--ignore-prefix` filtering.
 
 ### Output Formats
 
@@ -189,19 +275,24 @@ Draw.io and Excalidraw exports use a circular layout computed by lldp2map. Nodes
 | `1.0.8802.1.1.2.1.4.1.1.8` | lldpRemPortDesc | Remote port description |
 | `1.0.8802.1.1.2.1.4.1.1.9` | lldpRemSysName | Remote system name |
 | `1.0.8802.1.1.2.1.4.2.1.3` | lldpRemManAddrIfId | Remote management addresses |
-| `1.3.6.1.2.1.4.22.1.2` | ipNetToMediaPhysAddress | ARP table (MAC→IP, used for chassis ID fallback) |
+| `1.3.6.1.2.1.4.22.1.2` | ipNetToMediaPhysAddress | ARP table (MAC→IPv4, legacy fallback) |
+| `1.3.6.1.2.1.4.35.1.4` | ipNetToPhysicalPhysAddress | Unified neighbor table (MAC→IPv4+IPv6, RFC 4293) |
 | `1.3.6.1.2.1.4.34.1.3` | ipAddressIfIndex | Interface addresses, IPv4+IPv6 (RFC 4293) |
 | `1.3.6.1.2.1.4.20.1.1` | ipAdEntAddr | Interface addresses, IPv4 only (RFC 1213, fallback) |
 
 ## Project Structure
 
-```
+```text
 lldp2map/
-├── main.go                       # Entry point; routes --gui to gui.Run()
-├── cmd/root.go                   # CLI flags (Cobra)
-├── gui/app.go                    # Fyne GUI (--gui flag)
+├── main.go                       # Entry point (GUI+CLI); routes --gui to gui.Run()
+├── main_nogui.go                 # Entry point (CLI only, build tag: nogui)
+├── cmd/
+│   ├── root.go                   # CLI flags and run() (Cobra)
+│   └── lldp2map-gui/main.go      # Standalone GUI binary entry point
+├── gui/app.go                    # Fyne GUI (--gui flag or lldp2map-gui binary)
 ├── internal/
 │   ├── discover/discover.go      # BFS discovery engine (shared by CLI and GUI)
+│   ├── filter/addr.go            # Address family and prefix filtering
 │   ├── snmp/client.go            # SNMP v2c/v3 client (gosnmp)
 │   ├── lldp/walker.go            # LLDP MIB walker, OID parser, IP address walker
 │   ├── graph/topology.go         # In-memory topology graph
@@ -225,7 +316,8 @@ lldp2map/
 
 ## Caveats
 
-- Neighbors with no resolvable IP (no management address, no chassis networkAddress, and no ARP entry for their MAC) are added to the map but not recursed into. The discovery log explicitly reports this for each such neighbor.
+- Neighbors with no resolvable IP (no management address, no chassis networkAddress, and no ARP/NDP entry for their MAC) are added to the map but not recursed into. The discovery log explicitly reports this for each such neighbor.
+- `--addr-family` and `--ignore-prefix` affect both displayed labels and BFS discovery. If all management addresses for a neighbor are excluded by these filters, that neighbor will not be recursed into (this is logged clearly).
 - Duplicate edges (A→B and B→A) are automatically deduplicated.
 - If `lldpLocSysName` is not available, the device IP is used as the node label.
 - `--show-addrs` adds one extra SNMP walk per visited device. On large networks this increases discovery time.

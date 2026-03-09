@@ -3,7 +3,6 @@ module github.com/buraglio/lldp2map
 go 1.21
 
 require (
-// Fyne is the gui framework
 	fyne.io/fyne/v2 v2.7.3
 	github.com/gosnmp/gosnmp v1.37.0
 	github.com/spf13/cobra v1.8.0
