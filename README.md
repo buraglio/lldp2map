@@ -33,14 +33,33 @@ sudo apt install graphviz
 sudo dnf install graphviz
 ```
 
+The GUI depends on OpenGL and (on Linux) X11. These are only needed when building with GUI support (the default).
+
+```bash
+# Debian / Ubuntu
+sudo apt install libgl1-mesa-dev xorg-dev
+
+# RHEL / Fedora
+sudo dnf install mesa-libGL-devel libX11-devel
+```
+
 ## Build
 
-### CLI + GUI (single binary)
+### CLI + GUI (single binary, default)
 
 ```bash
 git clone https://github.com/buraglio/lldp2map.git
 cd lldp2map
 go build -o lldp2map .
+```
+
+### CLI only — no GUI, no C dependencies
+
+Use the `nogui` build tag to produce a pure-Go CLI binary with no OpenGL or X11
+requirements. This is the right choice for headless servers and CI environments.
+
+```bash
+go build -tags nogui -o lldp2map .
 ```
 
 ### Standalone GUI binary
@@ -66,7 +85,7 @@ go install github.com/buraglio/lldp2map@latest
 
 ### CLI
 
-```
+```text
 lldp2map <host> [flags]
 ```
 
@@ -81,6 +100,8 @@ lldp2map-gui
 ```
 
 Launches a Fyne-based desktop window with all flags exposed as form fields, a live scrolling discovery log, an infinite progress bar, and Cancel / Open Result buttons.
+
+![GUI screenshot](docs/gui.png)
 
 ### Flags
 
@@ -108,16 +129,19 @@ Launches a Fyne-based desktop window with all flags exposed as form fields, a li
 ### Examples
 
 **SNMPv2c, default community:**
+
 ```bash
 lldp2map -c public 3fff::1
 ```
 
 **SNMPv2c, PDF output, limit to 3 hops:**
+
 ```bash
 lldp2map -c public -f pdf -o topology.pdf --max-hops 3 3fff::1
 ```
 
 **SNMPv3 with auth and privacy (recommended):**
+
 ```bash
 lldp2map -v 3 \
   --username netops \
@@ -131,6 +155,7 @@ lldp2map -v 3 \
 ```
 
 **SNMPv3 auth-only, show interface addresses:**
+
 ```bash
 lldp2map -v 3 \
   --username monitor \
@@ -142,6 +167,7 @@ lldp2map -v 3 \
 ```
 
 **Show only IPv6 addresses, ignore documentation and loopback prefixes:**
+
 ```bash
 lldp2map -c public \
   --show-addrs \
@@ -152,6 +178,7 @@ lldp2map -c public \
 ```
 
 **Exclude RFC1918 and loopback from discovery and labels:**
+
 ```bash
 lldp2map -c public \
   --ignore-prefix 10.0.0.0/8 \
@@ -162,16 +189,19 @@ lldp2map -c public \
 ```
 
 **Export to Draw.io:**
+
 ```bash
 lldp2map -c public -f drawio 3fff::1
 ```
 
 **Export to Excalidraw:**
+
 ```bash
 lldp2map -c public -f excalidraw 3fff::1
 ```
 
 **Launch GUI:**
+
 ```bash
 lldp2map --gui
 # or
@@ -252,9 +282,10 @@ Draw.io and Excalidraw exports use a circular layout computed by lldp2map. Nodes
 
 ## Project Structure
 
-```
+```text
 lldp2map/
-├── main.go                       # Entry point; routes --gui to gui.Run()
+├── main.go                       # Entry point (GUI+CLI); routes --gui to gui.Run()
+├── main_nogui.go                 # Entry point (CLI only, build tag: nogui)
 ├── cmd/
 │   ├── root.go                   # CLI flags and run() (Cobra)
 │   └── lldp2map-gui/main.go      # Standalone GUI binary entry point
