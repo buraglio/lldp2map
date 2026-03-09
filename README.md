@@ -314,6 +314,40 @@ lldp2map/
 - [github.com/gosnmp/gosnmp](https://github.com/gosnmp/gosnmp) — SNMP v2c/v3
 - [github.com/spf13/cobra](https://github.com/spf13/cobra) — CLI framework
 
+## Linux lldpd and SNMP
+
+Linux hosts running [`lldpd`](https://lldpd.github.io) do **not** expose LLDP neighbor data via SNMP by default. `lldpd` must be configured to operate as an AgentX sub-agent alongside `snmpd`. Without this, lldp2map can still discover a Linux host as a *neighbor* (seen from an adjacent device's LLDP table), but it cannot recurse into that host to find *its* neighbors.
+
+This is particularly useful on operating systems like proxmox which also house LXCs and VMs that may also be running lldpd. I don't know if this works on VMWare or HyperV, or if lldp is exposed under windows, althugh it [can be enabled](https://learn.microsoft.com/en-us/powershell/module/netlldpagent/enable-netlldpagent?view=windowsserver2025-ps).
+
+To enable SNMP on a Linux host running `lldpd`:
+
+1. Install and configure `snmpd`, then add AgentX master support to `/etc/snmp/snmpd.conf`:
+
+```text
+master agentx
+```
+
+1. Start `lldpd` with the `-x` flag to connect as an AgentX sub-agent:
+
+```bash
+lldpd -x
+```
+
+Or, in `/etc/default/lldpd` (Debian/Ubuntu) or `/etc/sysconfig/lldpd` (RHEL/Fedora):
+
+```text
+DAEMON_ARGS="-x"
+```
+
+1. Restart both services:
+
+```bash
+systemctl restart snmpd lldpd
+```
+
+Once configured, lldp2map can walk the LLDP-MIB on the Linux host just like any other device.
+
 ## Caveats
 
 - Neighbors with no resolvable IP (no management address, no chassis networkAddress, and no ARP/NDP entry for their MAC) are added to the map but not recursed into. The discovery log explicitly reports this for each such neighbor.
