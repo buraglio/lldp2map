@@ -10,17 +10,17 @@ import (
 )
 
 var (
-	community    string
-	snmpVersion  string
-	username     string
-	authProto    string
-	authPass     string
-	privProto    string
-	privPass     string
-	secLevel     string
-	snmpPort     uint16
-	snmpTimeout  int
-	snmpRetries  int
+	community        string
+	snmpVersion      string
+	username         string
+	authProto        string
+	authPass         string
+	privProto        string
+	privPass         string
+	secLevel         string
+	snmpPort         uint16
+	snmpTimeout      int
+	snmpRetries      int
 	maxHops          int
 	showAddrs        bool
 	addrFamily       string
@@ -99,6 +99,14 @@ func init() {
 
 func run(_ *cobra.Command, args []string) error {
 	seedHost := args[0]
+
+	// Validate --addr-family early so the user gets a clear error before
+	// any SNMP connections are attempted.
+	switch addrFamily {
+	case "ipv4", "ipv6", "both":
+	default:
+		return fmt.Errorf("invalid --addr-family %q: must be ipv4, ipv6, or both", addrFamily)
+	}
 
 	validFormats := map[string]string{
 		"png":        ".png",
