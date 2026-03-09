@@ -42,6 +42,11 @@ const (
 	// ARP table — IPv4 MAC→IP mapping on the queried device.
 	// Index: ifIndex.a.b.c.d  Value: MAC (6 bytes)
 	oidARPPhysAddr = "1.3.6.1.2.1.4.22.1.2"
+
+	// ipNetToPhysicalTable (RFC 4293) — unified IPv4+IPv6 neighbor table.
+	// Index: ifIndex.addrType.addrLen.addr[bytes]  Value: MAC (6 bytes)
+	// addrType 1=IPv4 (4 bytes), 2=IPv6 (16 bytes)
+	oidIPNetToPhysicalPhysAddr = "1.3.6.1.2.1.4.35.1.4"
 )
 
 // Neighbor represents a single LLDP-discovered neighbor.
@@ -85,7 +90,9 @@ func Walk(client *snmpclient.Client) (*LocalInfo, error) {
 	sysNames := map[remKey]string{}
 	pdus, err := client.Walk(oidRemSysName)
 	if err != nil {
-		return nil, fmt.Errorf("walk lldpRemSysName: %w", err)
+		// Return whatever partial info we have so the caller can still register
+		// this node in the topology even if the full LLDP walk fails.
+		return info, fmt.Errorf("walk lldpRemSysName: %w", err)
 	}
 	for _, pdu := range pdus {
 		if k, ok := parseRemKey(pdu.Name, oidRemSysName); ok {
@@ -165,12 +172,17 @@ func Walk(client *snmpclient.Client) (*LocalInfo, error) {
 		}
 	}
 
-	// For MAC-identified chassis IDs, look up the matching IP in the device's ARP table.
+	// For MAC-identified chassis IDs, resolve to an IP address.
+	// Prefer the RFC 4293 unified IPv4+IPv6 neighbor table; fall back to the
+	// legacy IPv4-only ARP table for devices that don't implement RFC 4293.
 	if len(chassisMACs) > 0 {
-		arpMap := walkARP(client)
+		neighborMap := walkIPNetToPhysical(client)
+		if len(neighborMap) == 0 {
+			neighborMap = walkARP(client)
+		}
 		for k, mac := range chassisMACs {
 			if _, already := chassisIPs[k]; !already {
-				if ip, found := arpMap[mac]; found {
+				if ip, found := neighborMap[mac]; found {
 					chassisIPs[k] = ip
 				}
 			}
@@ -331,6 +343,67 @@ func walkARP(client *snmpclient.Client) map[[6]byte]net.IP {
 		var mac [6]byte
 		copy(mac[:], b)
 		result[mac] = ip
+	}
+	return result
+}
+
+// walkIPNetToPhysical walks the RFC 4293 ipNetToPhysicalTable, which contains
+// both IPv4 (ARP) and IPv6 (NDP) neighbor entries. Returns a MAC→IP map
+// preferring a global-unicast IPv6 address over IPv4 when both are present
+// for the same MAC. Loopback and link-local addresses are excluded.
+// Index format: ifIndex.addrType.addrLen.addr[bytes]  Value: MAC (6 bytes)
+func walkIPNetToPhysical(client *snmpclient.Client) map[[6]byte]net.IP {
+	result := map[[6]byte]net.IP{}
+	pdus, err := client.Walk(oidIPNetToPhysicalPhysAddr)
+	if err != nil {
+		return result
+	}
+	for _, pdu := range pdus {
+		suffix := suffixAfter(pdu.Name, oidIPNetToPhysicalPhysAddr)
+		if suffix == "" {
+			continue
+		}
+		parts := strings.Split(suffix, ".")
+		// Minimum: ifIndex(1) addrType(1) addrLen(1) addr(>=4) = 7 parts for IPv4.
+		if len(parts) < 7 {
+			continue
+		}
+		addrType := parts[1] // 1=IPv4, 2=IPv6
+
+		var ip net.IP
+		switch addrType {
+		case "1": // IPv4: addrLen always 4, addr starts at parts[3]
+			if len(parts) >= 7 {
+				ip = net.ParseIP(strings.Join(parts[3:7], "."))
+			}
+		case "2": // IPv6: addrLen always 16, addr starts at parts[3]
+			if len(parts) >= 19 {
+				b := make([]byte, 16)
+				for i := 0; i < 16; i++ {
+					var v int
+					fmt.Sscanf(parts[3+i], "%d", &v)
+					b[i] = byte(v)
+				}
+				ip = net.IP(b)
+			}
+		}
+
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+
+		mac, ok := pdu.Value.([]byte)
+		if !ok || len(mac) != 6 {
+			continue
+		}
+		var key [6]byte
+		copy(key[:], mac)
+
+		// Prefer global-unicast IPv6 over IPv4 when multiple entries share a MAC.
+		existing, has := result[key]
+		if !has || (existing.To4() != nil && ip.To4() == nil) {
+			result[key] = ip
+		}
 	}
 	return result
 }

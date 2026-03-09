@@ -1,36 +1,26 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"net"
 	"os"
-	"time"
 
-	"github.com/buraglio/lldp2map/internal/filter"
-	"github.com/buraglio/lldp2map/internal/graph"
-	"github.com/buraglio/lldp2map/internal/lldp"
-	"github.com/buraglio/lldp2map/internal/render"
-	snmpclient "github.com/buraglio/lldp2map/internal/snmp"
+	"github.com/buraglio/lldp2map/internal/discover"
 	"github.com/spf13/cobra"
 )
 
-type queueItem struct {
-	host  string
-	depth int
-}
-
 var (
-	community    string
-	snmpVersion  string
-	username     string
-	authProto    string
-	authPass     string
-	privProto    string
-	privPass     string
-	secLevel     string
-	snmpPort     uint16
-	snmpTimeout  int
-	snmpRetries  int
+	community        string
+	snmpVersion      string
+	username         string
+	authProto        string
+	authPass         string
+	privProto        string
+	privPass         string
+	secLevel         string
+	snmpPort         uint16
+	snmpTimeout      int
+	snmpRetries      int
 	maxHops          int
 	showAddrs        bool
 	addrFamily       string
@@ -99,8 +89,8 @@ func init() {
 	// Discovery
 	f.IntVar(&maxHops, "max-hops", 10, "Maximum BFS depth for recursive discovery")
 	f.BoolVar(&showAddrs, "show-addrs", false, "Include interface IPv4/IPv6 addresses in node labels (walks IP-MIB on each device)")
-	f.StringVar(&addrFamily, "addr-family", "both", "Address family to display with --show-addrs: ipv4, ipv6, or both")
-	f.StringArrayVar(&ignorePrefixStrs, "ignore-prefix", nil, "CIDR prefix to exclude from labels and discovery (repeatable: --ignore-prefix 127.0.0.0/8 --ignore-prefix fd68:1::/48)")
+	f.StringVar(&addrFamily, "addr-family", "both", "Address family to display/follow when --show-addrs is set: ipv4, ipv6, or both")
+	f.StringArrayVar(&ignorePrefixStrs, "ignore-prefix", nil, "CIDR prefix to exclude from labels and next-hop discovery (repeatable)")
 
 	// Output
 	f.StringVarP(&outputFile, "output", "o", "network-map.png", "Output file path")
@@ -110,21 +100,12 @@ func init() {
 func run(_ *cobra.Command, args []string) error {
 	seedHost := args[0]
 
-	// Validate --addr-family
+	// Validate --addr-family early so the user gets a clear error before
+	// any SNMP connections are attempted.
 	switch addrFamily {
 	case "ipv4", "ipv6", "both":
 	default:
 		return fmt.Errorf("invalid --addr-family %q: must be ipv4, ipv6, or both", addrFamily)
-	}
-
-	// Parse --ignore-prefix values once so we can reuse them throughout the run.
-	var ignorePrefixes []*net.IPNet
-	if len(ignorePrefixStrs) > 0 {
-		var err error
-		ignorePrefixes, err = filter.ParseIgnorePrefixes(ignorePrefixStrs)
-		if err != nil {
-			return err
-		}
 	}
 
 	validFormats := map[string]string{
@@ -142,126 +123,29 @@ func run(_ *cobra.Command, args []string) error {
 		outputFile = "network-map" + ext
 	}
 
-	baseCfg := snmpclient.Config{
-		Port:      snmpPort,
-		Version:   snmpVersion,
-		Community: community,
-		Username:  username,
-		AuthProto: snmpclient.AuthProto(authProto),
-		AuthPass:  authPass,
-		PrivProto: snmpclient.PrivProto(privProto),
-		PrivPass:  privPass,
-		SecLevel:  secLevel,
-		Timeout:   time.Duration(snmpTimeout) * time.Second,
-		Retries:   snmpRetries,
+	cfg := discover.Config{
+		SeedHost:         seedHost,
+		Community:        community,
+		Version:          snmpVersion,
+		Username:         username,
+		AuthProto:        authProto,
+		AuthPass:         authPass,
+		PrivProto:        privProto,
+		PrivPass:         privPass,
+		SecLevel:         secLevel,
+		Port:             snmpPort,
+		Timeout:          snmpTimeout,
+		Retries:          snmpRetries,
+		MaxHops:          maxHops,
+		ShowAddrs:        showAddrs,
+		AddrFamily:       addrFamily,
+		IgnorePrefixStrs: ignorePrefixStrs,
+		OutputFile:       outputFile,
+		OutputFormat:     outputFormat,
 	}
 
-	topo := graph.New()
-
-	queue := []queueItem{{host: seedHost, depth: 0}}
-	visited := map[string]bool{}
-
-	fmt.Printf("Starting LLDP discovery from %s (max-hops=%d)\n\n", seedHost, maxHops)
-
-	for len(queue) > 0 {
-		item := queue[0]
-		queue = queue[1:]
-
-		if visited[item.host] {
-			continue
-		}
-		visited[item.host] = true
-
-		indent := fmt.Sprintf("%*s", item.depth*2, "")
-		fmt.Printf("%s[hop %d] Querying %s...\n", indent, item.depth, item.host)
-
-		cfg := baseCfg
-		cfg.Host = item.host
-
-		client, err := snmpclient.New(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s  Warning: cannot connect to %s: %v\n", indent, item.host, err)
-			continue
-		}
-
-		info, err := lldp.Walk(client)
-		var ifAddrs []string
-		if err == nil && showAddrs {
-			raw, _ := lldp.WalkIPAddresses(client)
-			ifAddrs = filter.Addrs(raw, addrFamily, ignorePrefixes)
-		}
-		client.Close()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s  Warning: LLDP walk failed on %s: %v\n", indent, item.host, err)
-			continue
-		}
-
-		localName := info.SysName
-		if localName == "" {
-			localName = item.host
-		}
-
-		topo.AddNode(localName, item.host)
-		if len(ifAddrs) > 0 {
-			topo.SetAddrs(localName, ifAddrs)
-		}
-
-		if len(info.Neighbors) == 0 {
-			fmt.Printf("%s  No LLDP neighbors found.\n", indent)
-			continue
-		}
-
-		fmt.Printf("%s  Found %d neighbor(s) on %s:\n", indent, len(info.Neighbors), localName)
-
-		for _, neighbor := range info.Neighbors {
-			if neighbor.RemoteSys == "" {
-				continue
-			}
-
-			topo.AddNode(neighbor.RemoteSys, "")
-			topo.AddEdge(localName, neighbor.RemoteSys, neighbor.LocalPort, neighbor.RemotePort)
-
-			fmt.Printf("%s    %-30s  %s -> %s\n",
-				indent, neighbor.RemoteSys, neighbor.LocalPort, neighbor.RemotePort)
-
-			if item.depth >= maxHops {
-				continue
-			}
-
-			for _, ip := range filter.IPs(neighbor.MgmtAddrs, addrFamily, ignorePrefixes) {
-				ipStr := ip.String()
-				if !visited[ipStr] && !inQueue(queue, ipStr) {
-					queue = append(queue, queueItem{host: ipStr, depth: item.depth + 1})
-					topo.AddNode(neighbor.RemoteSys, ipStr)
-				}
-			}
-		}
-	}
-
-	nodeCount := len(topo.Nodes)
-	edgeCount := len(topo.Edges)
-
-	if nodeCount == 0 {
-		return fmt.Errorf("no LLDP data discovered from %s\n"+
-			"Check SNMP credentials and that LLDP is enabled on the device", seedHost)
-	}
-
-	fmt.Printf("\nDiscovered %d node(s), %d link(s)\n", nodeCount, edgeCount)
-	fmt.Printf("Rendering %s -> %s...\n", outputFormat, outputFile)
-
-	if err := render.Render(topo, outputFile, outputFormat); err != nil {
-		return err
-	}
-
-	fmt.Printf("Done. Output saved to: %s\n", outputFile)
-	return nil
-}
-
-func inQueue(queue []queueItem, host string) bool {
-	for _, item := range queue {
-		if item.host == host {
-			return true
-		}
-	}
-	return false
+	_, err := discover.Run(context.Background(), cfg, func(msg string) {
+		fmt.Println(msg)
+	})
+	return err
 }
