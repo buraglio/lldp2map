@@ -116,6 +116,13 @@ func Run(ctx context.Context, cfg Config, log func(string)) (*graph.Topology, er
 
 		if err != nil {
 			log(fmt.Sprintf("%s  Warning: LLDP walk failed on %s: %v", indent, item.host, err))
+			// Preserve the node even on a partial walk failure so that the
+			// device appears in the topology (it was reachable via SNMP).
+			nodeName := item.host
+			if info != nil && info.SysName != "" {
+				nodeName = info.SysName
+			}
+			topo.AddNode(nodeName, item.host)
 			continue
 		}
 
@@ -157,8 +164,14 @@ func Run(ctx context.Context, cfg Config, log func(string)) (*graph.Topology, er
 				continue
 			}
 
+			filteredAddrs := filter.IPs(neighbor.MgmtAddrs, cfg.AddrFamily, ignorePrefixes)
+			if len(filteredAddrs) == 0 && len(neighbor.MgmtAddrs) > 0 {
+				log(fmt.Sprintf("%s      (all %d management address(es) excluded by addr-family/ignore-prefix filter)", indent, len(neighbor.MgmtAddrs)))
+				continue
+			}
+
 			queued := 0
-			for _, ip := range filter.IPs(neighbor.MgmtAddrs, cfg.AddrFamily, ignorePrefixes) {
+			for _, ip := range filteredAddrs {
 				ipStr := ip.String()
 				if !visited[ipStr] && !inQueue(queue, ipStr) {
 					queue = append(queue, queueItem{host: ipStr, depth: item.depth + 1})
@@ -168,7 +181,7 @@ func Run(ctx context.Context, cfg Config, log func(string)) (*graph.Topology, er
 				}
 			}
 			if queued == 0 {
-				log(fmt.Sprintf("%s      (all %d address(es) already visited/queued)", indent, len(neighbor.MgmtAddrs)))
+				log(fmt.Sprintf("%s      (all %d management address(es) already visited or queued)", indent, len(filteredAddrs)))
 			}
 		}
 	}
